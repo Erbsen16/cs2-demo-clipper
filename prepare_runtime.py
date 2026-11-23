@@ -2,8 +2,8 @@
 import hashlib
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
-from urllib.request import urlopen
 from zipfile import ZipFile
 
 import imageio_ffmpeg
@@ -25,8 +25,13 @@ def prepare():
         if not RECORDER.is_file():
             print("Downloading CS2 recording tools (first launch)...", flush=True)
             archive = staging / "capture.zip"
-            with urlopen(URL, timeout=90) as response, archive.open("wb") as target:
-                shutil.copyfileobj(response, target)
+            subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                 "$ProgressPreference = 'SilentlyContinue'; "
+                 "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
+                 f"Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri '{URL}' -OutFile capture.zip"],
+                cwd=staging, check=True, timeout=300,
+            )
             with archive.open("rb") as data:
                 digest = hashlib.file_digest(data, "sha256").hexdigest()
             if digest != SHA256:
