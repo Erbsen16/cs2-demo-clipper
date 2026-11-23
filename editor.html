@@ -1,0 +1,154 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CS2 自动剪辑</title>
+<style>
+:root{color-scheme:dark;font:16px/1.55 "Microsoft YaHei UI",sans-serif;background:#101217;color:#f1f3f5}
+*{box-sizing:border-box}body{margin:0}main{max-width:850px;padding:44px 22px;margin:auto}
+h1{font-size:clamp(32px,6vw,50px);line-height:1.1;margin:0 0 10px}h2{font-size:19px;margin:0 0 14px}p{margin:0 0 12px;color:#bdc5ce}
+section,aside{background:#1b1f26;border:1px solid #333b47;border-radius:15px;padding:20px;margin-top:16px}
+aside{border-color:#866128;background:#2b2319}button,select,input::file-selector-button,.button{border:1px solid #515e6f;border-radius:8px;padding:9px 12px;font:inherit;background:#282f3a;color:#fff}
+button,.button,input::file-selector-button{cursor:pointer}button:disabled{cursor:default;opacity:.5}.button{text-decoration:none;display:inline-block}
+.primary{background:#ffcb59;color:#221700;border-color:#ffcb59;font-weight:bold}
+label{display:grid;gap:6px}.choices{display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px}select{min-width:0;width:100%}
+a{color:#ffd47a}output{display:block;color:#d9e3ef;white-space:pre-wrap;overflow-wrap:anywhere;margin-top:12px}[hidden]{display:none!important}
+@media(max-width:650px){.choices{grid-template-columns:1fr}main{padding:26px 12px}}
+#drop{position:relative;justify-items:center;padding:24px;border:2px dashed #677381;border-radius:9px;cursor:pointer}
+#drop.on,#drop:focus-within{border-color:#ffcb59;background:#30291e}#drop input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}#drop span{color:#bdc5ce}
+</style>
+<main>
+<header><h1>CS2 自动剪辑</h1><p>选一个 Demo，生成带击杀计数的选手视角合集。</p></header>
+
+<section>
+<h2>1. 选择比赛 Demo</h2>
+<label id="drop"><strong>把 .dem 文件拖到这里</strong><span>或点击选择比赛文件</span>
+<input id="file" aria-label="选择比赛 Demo" type="file" accept=".dem"></label>
+<output id="source" aria-live="polite"></output>
+</section>
+<section>
+<h2>2. 选择选手和剪辑内容</h2>
+<div class="choices">
+<label>选手<select id="player" disabled></select></label>
+<label>剪辑模式<select id="mode"></select></label>
+<label>枪械<select id="weapon"></select></label>
+</div>
+<output id="preview" aria-live="polite"></output>
+</section>
+<section>
+<h2>3. 导出视频</h2>
+<button class="primary" id="export" disabled>自动导出 MP4</button>
+<a class="button" id="download" href="./download" hidden>下载成片</a>
+<output id="status" aria-live="polite"></output>
+</section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const fill = (id, values) => $(id).replaceChildren(...values.map(value => new Option(id === 'player' ? value.replace(/ \[.*\]$/, '') : value, value)));
+let ready = false, busy = false, clips = 0, previewVersion = 0;
+function controls() {
+  $('export').disabled = !ready || busy || !clips;
+  $('file').disabled = busy;
+  $('player').disabled = busy || !$('player').options.length;
+  $('mode').disabled = busy;
+  $('weapon').disabled = busy || $('mode').value === '全部死亡';
+}
+async function request(route, body) {
+  const response = await fetch('./' + route, body === undefined ? {} : {method:'POST', body});
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || '请求失败');
+  return data;
+}
+async function sync() {
+  const data = await request('status');
+  ready = data.ready;
+  busy = data.busy;
+  if (!ready) data.message ||= '内置录制组件缺失，请使用完整的工具目录。';
+  $('download').hidden = !data.download;
+  $('status').textContent = data.message;
+  controls();
+  return data;
+}
+const params = () => JSON.stringify({player:$('player').value, mode:$('mode').value, weapon:$('weapon').value});
+async function preview() {
+  const version = ++previewVersion;
+  clips = 0;
+  controls();
+  if (!$('player').value) return;
+  try {
+    const data = await request('preview', params());
+    if (version !== previewVersion) return;
+    clips = data.clips;
+    $('preview').textContent = clips
+      ? `${data.events} 条匹配事件，合并后 ${clips} 个片段。`
+      : '这组条件没有匹配片段，可切换剪辑模式或枪械。';
+  } catch (error) {
+    if (version === previewVersion) $('preview').textContent = error.message;
+  }
+  controls();
+}
+async function loadFile(file) {
+  if (!file || busy) return;
+  if (!file.name.toLowerCase().endsWith('.dem')) {
+    $('source').textContent = '请选择 .dem 格式的比赛文件。';
+    return;
+  }
+  busy = true;
+  clips = 0;
+  controls();
+  $('source').textContent = '正在读取并解析 Demo…';
+  try {
+    const data = await request('demo', file);
+    fill('player', data.players);
+    $('source').textContent = `${file.name} · ${data.players.length} 名选手`;
+    await sync();
+    await preview();
+  } catch (error) {
+    $('source').textContent = error.message;
+    busy = false;
+    await preview();
+  }
+};
+$('file').onchange = () => loadFile($('file').files[0]);
+document.addEventListener('dragover', event => event.preventDefault());
+document.addEventListener('drop', event => event.preventDefault());
+$('drop').ondragover = event => { event.preventDefault(); $('drop').classList.add('on'); };
+$('drop').ondragleave = () => $('drop').classList.remove('on');
+$('drop').ondrop = event => {
+  event.preventDefault();
+  $('drop').classList.remove('on');
+  if (event.dataTransfer.files.length === 1) loadFile(event.dataTransfer.files[0]);
+  else $('source').textContent = '请每次拖入一场比赛。';
+};
+['player','mode','weapon'].forEach(id => $(id).onchange = preview);
+
+$('export').onclick = async () => {
+  busy = true;
+  controls();
+  $('download').hidden = true;
+  try {
+    const data = await request('export', params());
+    $('status').textContent = data.message;
+    await waitForExport();
+    if (!$('download').hidden) $('download').click();
+  } catch (error) {
+    busy = false;
+    $('status').textContent = error.message;
+    controls();
+  }
+};
+async function waitForExport() {
+  while (busy) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    await sync();
+  }
+}
+sync().then(async data => {
+  fill('mode', data.modes);
+  fill('weapon', data.weapons);
+  fill('player', data.players);
+  if (busy) await waitForExport();
+  return preview();
+}).catch(error => $('status').textContent = error.message);
+</script>
+</html>
