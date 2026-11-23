@@ -8,7 +8,7 @@ import threading
 import webbrowser
 from urllib.parse import quote
 
-from app import ALL, MODES, WEAPONS, make_clips, read_demo, select_events
+from app import ALL, COUNTERS, MODES, WEAPONS, make_clips, read_demo, select_events
 from recorder import RECORDER, record_demo
 
 
@@ -106,6 +106,10 @@ def serve():
                         mode, weapon = settings.get("mode"), settings.get("weapon")
                         if player is None or mode not in MODES or weapon not in (ALL, *WEAPONS):
                             raise ValueError("请先选择 Demo、选手和剪辑模式。")
+                        style = settings.get("counter", COUNTERS[0])
+                        show_label = settings.get("showLabel", True)
+                        if style not in COUNTERS or not isinstance(show_label, bool):
+                            raise ValueError("统计显示选项无效。")
                         selected, kills = select_events(state["events"], player, mode, weapon)
                         if self.path.endswith("/preview"):
                             clips = make_clips(selected, kills, 0, 64, float("inf"))
@@ -122,7 +126,9 @@ def serve():
                             def render():
                                 output = folder / (secrets.token_hex(8) + ".mp4")
                                 try:
-                                    clips = make_clips(selected, kills, 0, 64, float("inf"))
+                                    deaths = [event for event in state["events"] if event.get("user_identity") == player]
+                                    clips = make_clips(selected, kills, 0, 64, float("inf"),
+                                                       deaths=deaths, style=style, show_label=show_label)
                                     name = settings["player"].rsplit(" [", 1)[0]
                                     record_demo(demo, output, player, name, clips, update)
                                     with lock:

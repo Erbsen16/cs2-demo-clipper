@@ -16,6 +16,7 @@ a{color:#ffd47a}output{display:block;color:#d9e3ef;white-space:pre-wrap;overflow
 @media(max-width:650px){.choices{grid-template-columns:1fr}main{padding:26px 12px}}
 #drop{position:relative;justify-items:center;padding:24px;border:2px dashed #677381;border-radius:9px;cursor:pointer}
 #drop.on,#drop:focus-within{border-color:#ffcb59;background:#30291e}#drop input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}#drop span{color:#bdc5ce}
+.counter-options{display:flex;align-items:flex-end;gap:20px;margin-bottom:16px}.check{display:flex;align-items:center;padding-bottom:8px;gap:7px}
 </style>
 <main>
 <header><h1>CS2 自动剪辑</h1><p>选一个 Demo，生成带击杀计数的选手视角合集。</p></header>
@@ -37,6 +38,10 @@ a{color:#ffd47a}output{display:block;color:#d9e3ef;white-space:pre-wrap;overflow
 </section>
 <section>
 <h2>3. 导出视频</h2>
+<div class="counter-options">
+<label>画面统计<select id="counter"><option>仅击杀</option><option>击杀-死亡</option><option>不显示</option></select></label>
+<label class="check"><input type="checkbox" id="showLabel" checked>显示 KILLS 字样</label>
+</div>
 <button class="primary" id="export" disabled>自动导出 MP4</button>
 <a class="button" id="download" href="./download" hidden>下载成片</a>
 <output id="status" aria-live="polite"></output>
@@ -51,6 +56,8 @@ function controls() {
   $('file').disabled = busy;
   $('player').disabled = busy || !$('player').options.length;
   $('mode').disabled = busy;
+  $('counter').disabled = busy;
+  $('showLabel').disabled = busy || $('counter').value === '不显示';
   $('weapon').disabled = busy || $('mode').value === '全部死亡';
 }
 async function request(route, body) {
@@ -69,7 +76,11 @@ async function sync() {
   controls();
   return data;
 }
-const params = () => JSON.stringify({player:$('player').value, mode:$('mode').value, weapon:$('weapon').value});
+$('counter').onchange = controls;
+const params = () => JSON.stringify({
+  player: $('player').value, mode: $('mode').value, weapon: $('weapon').value,
+  counter: $('counter').value, showLabel: $('showLabel').checked,
+});
 async function preview() {
   const version = ++previewVersion;
   clips = 0;

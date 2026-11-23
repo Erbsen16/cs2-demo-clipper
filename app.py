@@ -1,4 +1,5 @@
-﻿import os
+﻿from bisect import bisect_left, bisect_right
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -70,7 +71,19 @@ def select_events(events, player, mode, category):
     return selected, kills
 
 
-def make_clips(selected, kills, tick_zero, tick_rate, duration):
+COUNTERS = ("仅击杀", "击杀-死亡", "不显示")
+
+
+def counter_text(kills, deaths, style, show_label):
+    if style == "击杀-死亡":
+        value = f"i{deaths}" if kills == 1 else f"{kills}-{deaths}"
+    else:
+        value = str(kills)
+    return f"KILLS  {value}" if show_label else value
+
+
+def make_clips(selected, kills, tick_zero, tick_rate, duration, *,
+               deaths=(), style="仅击杀", show_label=True):
     windows = []
     for event in selected:
         moment = tick_zero + event["tick"] / tick_rate
@@ -81,16 +94,24 @@ def make_clips(selected, kills, tick_zero, tick_rate, duration):
             windows[-1] = (windows[-1][0], end)
         else:
             windows.append((start, end))
+    if style == "不显示":
+        return [(start, end, None, []) for start, end in windows]
+    kill_times = sorted(tick_zero + event["tick"] / tick_rate for event in kills)
+    death_times = sorted(tick_zero + event["tick"] / tick_rate for event in deaths) if style == "击杀-死亡" else []
     clips = []
-    count = 0
+    shown_kills = 0
     for start, end in windows:
-        moments = [
-            tick_zero + event["tick"] / tick_rate - start
-            for event in kills
-            if start <= tick_zero + event["tick"] / tick_rate < end
-        ]
-        clips.append((start, end, count, moments))
-        count += len(moments)
+        left, right = bisect_left(kill_times, start), bisect_left(kill_times, end)
+        dleft, dright = bisect_left(death_times, start), bisect_left(death_times, end)
+        initial_kills = left if style == "击杀-死亡" else shown_kills
+        initial = counter_text(initial_kills, dleft, style, show_label)
+        updates = []
+        for moment in sorted(set(kill_times[left:right] + death_times[dleft:dright])):
+            kill_count = initial_kills + bisect_right(kill_times, moment) - left
+            death_count = bisect_right(death_times, moment)
+            updates.append((moment - start, counter_text(kill_count, death_count, style, show_label)))
+        clips.append((start, end, initial, updates))
+        shown_kills += right - left
     return clips
 
 
@@ -100,7 +121,7 @@ def ass_time(value):
     return f"{minutes // 60}:{minutes % 60:02}:{seconds // 100:02}.{seconds % 100:02}"
 
 
-def write_counter(path, length, count, moments):
+def write_counter(path, length, text, updates):
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1280
@@ -113,19 +134,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = [header]
     start = 0
-    for end in [*moments, length]:
+    for end, next_text in [*updates, (length, None)]:
         if ass_time(end) != ass_time(start):
-            lines.append(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,KILLS  {count}\n")
-        count += 1
+            lines.append(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,{text}\n")
+        text = next_text
         start = end
     path.write_text("".join(lines), encoding="utf-8")
 
 
-def export_video(source, destination, selected, kills, tick_zero, rate, progress):
+def export_video(source, destination, selected, kills, tick_zero, rate, progress, **counter):
     import imageio_ffmpeg
 
     duration = imageio_ffmpeg.count_frames_and_secs(source)[1]
-    clips = make_clips(selected, kills, tick_zero, rate, duration)
+    clips = make_clips(selected, kills, tick_zero, rate, duration, **counter)
     encode_clips(destination, [(source, *clip) for clip in clips], progress)
 
 
@@ -147,14 +168,17 @@ def encode_clips(destination, clips, progress):
     with tempfile.TemporaryDirectory(dir=Path(destination).parent) as folder:
         root = Path(folder)
         entries = []
-        for index, (source, start, end, count, moments) in enumerate(clips):
+        for index, (source, start, end, initial, updates) in enumerate(clips):
             progress(f"正在编码片段 {index + 1} / {len(clips)}")
-            write_counter(root / "counter.ass", end - start, count, moments)
+            filters = ["pad=ceil(iw/2)*2:ceil(ih/2)*2"]
+            if initial is not None:
+                write_counter(root / "counter.ass", end - start, initial, updates)
+                filters.insert(0, "subtitles=counter.ass")
             name = f"clip{index}.mp4"
             ffmpeg([
                 "-ss", str(start), "-i", source, "-t", str(end - start),
                 "-map", "0:v:0", "-map", "0:a:0?",
-                "-vf", "subtitles=counter.ass,pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                "-vf", ",".join(filters),
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", name,
             ], folder)
@@ -166,13 +190,13 @@ def encode_clips(destination, clips, progress):
         os.replace(root / "result.mp4", destination)
 
 
-def export_demo(demo, destination, player_id, selected, kills, progress):
+def export_demo(demo, destination, player_id, selected, kills, progress, **counter):
     from recorder import record_demo
 
     for event in selected:
         for role in ("attacker", "user"):
             if event.get(f"{role}_identity") == player_id:
-                clips = make_clips(selected, kills, 0, 64, float("inf"))
+                clips = make_clips(selected, kills, 0, 64, float("inf"), **counter)
                 return record_demo(demo, destination, player_id, event[f"{role}_name"], clips, progress)
     raise ValueError("没有找到这名选手的片段。")
 
@@ -253,13 +277,20 @@ class Editor:
         self.timeline.bind("<<TreeviewSelect>>", self.update_alignment_button)
         self.alignment_hint = ttk.Label(panel, text="选中一条事件填入 Tick，再输入该事件在录像中的秒数。")
         self.alignment_hint.grid(row=8, column=1, columnspan=2, sticky="e", pady=(8, 0))
+        options = ttk.Frame(panel)
+        options.grid(row=9, columnspan=3, sticky="w", pady=4)
+        self.counter_style = tk.StringVar(value=COUNTERS[0])
+        self.counter_label = tk.BooleanVar(value=True)
+        ttk.Label(options, text="画面统计").pack(side="left")
+        ttk.Combobox(options, textvariable=self.counter_style, values=COUNTERS, state="readonly", width=12).pack(side="left", padx=8)
+        ttk.Checkbutton(options, text="显示 KILLS 字样", variable=self.counter_label).pack(side="left")
         self.visible_events = None
         self.export_button = ttk.Button(panel, text="导出 MP4", style="Accent.TButton", command=self.export)
         self.export_button.configure(text="从已有录像导出")
-        self.export_button.grid(row=10, columnspan=3, sticky="ew", pady=4)
+        self.export_button.grid(row=11, columnspan=3, sticky="ew", pady=4)
         self.auto_button = ttk.Button(panel, text="从 Demo 全自动导出 MP4", style="Accent.TButton", command=self.export_auto)
-        self.auto_button.grid(row=9, columnspan=3, sticky="ew", pady=4)
-        ttk.Label(panel, textvariable=self.status, wraplength=620).grid(row=11, columnspan=3, sticky="w", pady=8)
+        self.auto_button.grid(row=10, columnspan=3, sticky="ew", pady=4)
+        ttk.Label(panel, textvariable=self.status, wraplength=620).grid(row=12, columnspan=3, sticky="w", pady=8)
         self.busy = False
         for variable in (self.player, self.mode, self.category, self.video):
             variable.trace_add("write", self.refresh)
@@ -363,6 +394,11 @@ class Editor:
         if path:
             self.video.set(path)
 
+    def counter_options(self):
+        player = self.players[self.player.get()]
+        return {"style": self.counter_style.get(), "show_label": self.counter_label.get(),
+                "deaths": [event for event in self.events if event.get("user_identity") == player]}
+
     def export_auto(self):
         destination = filedialog.asksaveasfilename(defaultextension=".mp4", filetypes=[("MP4", "*.mp4")])
         if not destination:
@@ -370,8 +406,9 @@ class Editor:
         demo = self.demo.get()
         player_id = self.players[self.player.get()]
         selected, kills = self.selection()
+        counter = self.counter_options()
         self.background(
-            lambda progress: export_demo(demo, destination, player_id, selected, kills, progress),
+            lambda progress: export_demo(demo, destination, player_id, selected, kills, progress, **counter),
             lambda _: self.status.set(f"已导出 {destination}"),
             "正在准备自动导出…",
         )
@@ -394,8 +431,9 @@ class Editor:
             messagebox.showerror("导出", "请选择与源录像不同的保存路径。")
             return
         selected, kills = self.selection()
+        counter = self.counter_options()
         self.background(
-            lambda progress: export_video(source, destination, selected, kills, seconds - tick / rate, rate, progress),
+            lambda progress: export_video(source, destination, selected, kills, seconds - tick / rate, rate, progress, **counter),
             lambda _: self.status.set(f"已导出 {destination}"),
             "正在读取录像…",
         )

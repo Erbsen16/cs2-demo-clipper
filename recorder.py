@@ -97,24 +97,25 @@ def _capture(demo, destination, player_id, player_name, clips, progress, encode_
                             timed_out = True
                 if process.returncode == 0:
                     completed = len(pending)
-                for index, (start, end, count, moments) in enumerate(pending[:completed]):
+                for index, (start, end, initial, updates) in enumerate(pending[:completed]):
                     recording = root / f"{base}_{index:03}.mp4"
                     if not recording.is_file():
                         raise RuntimeError(f"录制片段缺失，详情见 {log_path}")
-                    sources.append((str(recording), 0, end - start, count, moments))
+                    sources.append((str(recording), 0, end - start, initial, updates))
                 pending = pending[completed:]
                 if process.returncode:
                     if not timed_out or not pending:
                         raise RuntimeError(f"CS2 录制失败。详细日志：{log_path}")
-                    start, end, count, moments = pending[0]
+                    start, end, initial, updates = pending[0]
                     if end - start <= 2:
                         raise RuntimeError(f"CS2 回放没有到达目标时间。详细日志：{log_path}")
                     middle = round((start + end) * 32) / 64
                     offset = middle - start
-                    before = [moment for moment in moments if moment < offset]
-                    after = [moment - offset for moment in moments if moment >= offset]
-                    pending[:1] = [(start, middle, count, before),
-                                   (middle, end, count + len(before), after)]
+                    before = [(t, text) for t, text in updates if t < offset]
+                    after = [(t - offset, text) for t, text in updates if t >= offset]
+                    right_initial = before[-1][1] if before else initial
+                    pending[:1] = [(start, middle, initial, before),
+                                   (middle, end, right_initial, after)]
                     progress("当前片段录制超时，已保留完成的片段，正在分段重试…")
                 batch += 1
         encode_clips(destination, sources, progress)
