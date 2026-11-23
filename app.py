@@ -14,7 +14,7 @@ WEAPONS = {
     "冲锋枪": "mac10 mp9 mp7 mp5sd ump45 p90 bizon",
 }
 ALL = "全部枪械"
-MODES = ("高光", "全部击杀", "全部死亡", "击杀和死亡")
+MODES = ("高光", "全部击杀", "全部死亡", "击杀和死亡", "单回合特剪")
 
 
 def read_demo(path):
@@ -39,7 +39,10 @@ def read_demo(path):
     return events, dict(sorted(players.items()))
 
 
-def select_events(events, player, mode, category):
+HIGHLIGHTS = {"multi": "多杀", "headshot": "爆头", "noscope": "盲狙", "thrusmoke": "穿烟", "penetrated": "穿墙"}
+
+
+def select_events(events, player, mode, category, highlights=None, round_id=None):
     kills = [
         event for event in events
         if event.get("attacker_identity") == player
@@ -49,15 +52,16 @@ def select_events(events, player, mode, category):
     if mode == "全部死亡":
         return [event for event in events if event.get("user_identity") == player], kills
     selected = kills
-    if mode == "高光":
+    if mode in ("高光", "单回合特剪"):
+        highlights = HIGHLIGHTS if highlights is None else highlights
         round_counts = {}
         for event in kills:
             round_id = event["total_rounds_played"]
             round_counts[round_id] = round_counts.get(round_id, 0) + 1
         selected = [
             event for event in kills
-            if round_counts[event["total_rounds_played"]] >= 2
-            or any(event.get(flag) for flag in ("headshot", "noscope", "thrusmoke", "penetrated"))
+            if ("multi" in highlights and round_counts[event["total_rounds_played"]] >= 2)
+            or any(event.get(flag) for flag in highlights if flag != "multi")
         ]
     if category != ALL:
         weapons = WEAPONS[category].split()
@@ -65,6 +69,10 @@ def select_events(events, player, mode, category):
             event for event in selected
             if event["weapon"].removeprefix("weapon_") in weapons
         ]
+    if mode == "单回合特剪" and selected:
+        candidate_rounds = {event["total_rounds_played"] for event in selected}
+        chosen_round = round_id if round_id in candidate_rounds else min(candidate_rounds)
+        selected = [event for event in kills if event["total_rounds_played"] == chosen_round]
     if mode == "击杀和死亡":
         deaths = [event for event in events if event.get("user_identity") == player]
         selected = sorted(selected + deaths, key=lambda event: event["tick"])
@@ -83,13 +91,13 @@ def counter_text(kills, deaths, style, show_label):
 
 
 def make_clips(selected, kills, tick_zero, tick_rate, duration, *,
-               deaths=(), style="仅击杀", show_label=True):
+               deaths=(), style="仅击杀", show_label=True, montage=False):
     windows = []
     for event in selected:
         moment = tick_zero + event["tick"] / tick_rate
         if not 0 <= moment < duration:
             continue
-        start, end = max(0, moment - 5), min(duration, moment + 3)
+        start, end = max(0, moment - (3 if montage else 5)), min(duration, moment + (1.5 if montage else 3))
         if windows and start <= windows[-1][1]:
             windows[-1] = (windows[-1][0], end)
         else:
@@ -121,7 +129,7 @@ def ass_time(value):
     return f"{minutes // 60}:{minutes % 60:02}:{seconds // 100:02}.{seconds % 100:02}"
 
 
-def write_counter(path, length, text, updates):
+def write_counter(path, length, text, updates, advanced=None):
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1280
@@ -132,25 +140,32 @@ Style: Default,Arial,32,&H00FFFFFF,&H00FFFFFF,&HFF000000,&HFF000000,-1,0,0,0,100
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    placement = ""
+    if advanced:
+        anchor, x, y = advanced.subtitle_layout()
+        placement = rf"{{\an{anchor}\pos({x},{y})}}"
+        header = header.replace("PlayResX: 1280", f"PlayResX: {advanced.width}")
+        header = header.replace("PlayResY: 720", f"PlayResY: {advanced.height}")
+        header = header.replace("Default,Arial,32,", f"Default,Arial,{round(advanced.fontSize * advanced.height / 720)},")
     lines = [header]
     start = 0
     for end, next_text in [*updates, (length, None)]:
         if ass_time(end) != ass_time(start):
-            lines.append(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,{text}\n")
+            lines.append(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,{placement}{text}\n")
         text = next_text
         start = end
     path.write_text("".join(lines), encoding="utf-8")
 
 
-def export_video(source, destination, selected, kills, tick_zero, rate, progress, **counter):
+def export_video(source, destination, selected, kills, tick_zero, rate, progress, *, montage=False, **counter):
     import imageio_ffmpeg
 
     duration = imageio_ffmpeg.count_frames_and_secs(source)[1]
-    clips = make_clips(selected, kills, tick_zero, rate, duration, **counter)
-    encode_clips(destination, [(source, *clip) for clip in clips], progress)
+    clips = make_clips(selected, kills, tick_zero, rate, duration, montage=montage, **counter)
+    encode_clips(destination, [(source, *clip) for clip in clips], progress, montage=montage)
 
 
-def encode_clips(destination, clips, progress):
+def encode_clips(destination, clips, progress, advanced=None, montage=False):
     import imageio_ffmpeg
 
     executable = imageio_ffmpeg.get_ffmpeg_exe()
@@ -172,15 +187,20 @@ def encode_clips(destination, clips, progress):
             progress(f"正在编码片段 {index + 1} / {len(clips)}")
             filters = ["pad=ceil(iw/2)*2:ceil(ih/2)*2"]
             if initial is not None:
-                write_counter(root / "counter.ass", end - start, initial, updates)
+                write_counter(root / "counter.ass", end - start, initial, updates, advanced)
                 filters.insert(0, "subtitles=counter.ass")
+            audio_filters = []
+            if montage:
+                tail = max(0, end - start - 0.22)
+                filters.extend(["fade=t=in:d=0.10", f"fade=t=out:st={tail}:d=0.22"])
+                audio_filters = ["-af", f"afade=t=in:d=0.10,afade=t=out:st={tail}:d=0.22"]
             name = f"clip{index}.mp4"
             ffmpeg([
                 "-ss", str(start), "-i", source, "-t", str(end - start),
                 "-map", "0:v:0", "-map", "0:a:0?",
                 "-vf", ",".join(filters),
-                "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", name,
+                "-c:v", "libx264", "-preset", "fast", "-crf", str(advanced.crf if advanced else 18), "-pix_fmt", "yuv420p",
+                *audio_filters, "-c:a", "aac", name,
             ], folder)
             entries.append(f"file '{name}'\n")
         progress("正在合并片段…")
@@ -190,14 +210,14 @@ def encode_clips(destination, clips, progress):
         os.replace(root / "result.mp4", destination)
 
 
-def export_demo(demo, destination, player_id, selected, kills, progress, **counter):
+def export_demo(demo, destination, player_id, selected, kills, progress, *, montage=False, **counter):
     from recorder import record_demo
 
     for event in selected:
         for role in ("attacker", "user"):
             if event.get(f"{role}_identity") == player_id:
-                clips = make_clips(selected, kills, 0, 64, float("inf"), **counter)
-                return record_demo(demo, destination, player_id, event[f"{role}_name"], clips, progress)
+                clips = make_clips(selected, kills, 0, 64, float("inf"), montage=montage, **counter)
+                return record_demo(demo, destination, player_id, event[f"{role}_name"], clips, progress, montage=montage)
     raise ValueError("没有找到这名选手的片段。")
 
 
@@ -407,6 +427,7 @@ class Editor:
         player_id = self.players[self.player.get()]
         selected, kills = self.selection()
         counter = self.counter_options()
+        counter["montage"] = self.mode.get() == "单回合特剪"
         self.background(
             lambda progress: export_demo(demo, destination, player_id, selected, kills, progress, **counter),
             lambda _: self.status.set(f"已导出 {destination}"),
@@ -432,6 +453,7 @@ class Editor:
             return
         selected, kills = self.selection()
         counter = self.counter_options()
+        counter["montage"] = self.mode.get() == "单回合特剪"
         self.background(
             lambda progress: export_video(source, destination, selected, kills, seconds - tick / rate, rate, progress, **counter),
             lambda _: self.status.set(f"已导出 {destination}"),

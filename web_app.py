@@ -8,7 +8,8 @@ import threading
 import webbrowser
 from urllib.parse import quote
 
-from app import ALL, COUNTERS, MODES, WEAPONS, make_clips, read_demo, select_events
+from app import ALL, COUNTERS, HIGHLIGHTS, MODES, WEAPONS, make_clips, read_demo, select_events
+from capture_settings import CaptureSettings, SIZES
 from recorder import RECORDER, record_demo
 
 
@@ -41,13 +42,17 @@ def serve():
             def do_GET(self):
                 if self.path == prefix + "/":
                     self.send(html, "text/html; charset=utf-8")
+                elif self.path == prefix + "/preview-frame.jpg":
+                    self.send(Path(__file__).with_name("preview-frame.jpg").read_bytes(), "image/jpeg")
+                elif self.path == prefix + "/advanced.js":
+                    self.send(Path(__file__).with_name("advanced.js").read_bytes(), "text/javascript; charset=utf-8")
                 elif self.path == prefix + "/status":
                     with lock:
                         self.reply({
                             "players": list(state["players"]), "ready": RECORDER.is_file(),
                             "busy": state["busy"], "message": state["message"],
                             "download": bool(state["output"]),
-                            "modes": MODES, "weapons": [ALL, *WEAPONS],
+                            "highlights": HIGHLIGHTS, "sizes": SIZES, "modes": MODES, "weapons": [ALL, *WEAPONS],
                         })
                 elif self.path == prefix + "/download":
                     with lock:
@@ -106,14 +111,27 @@ def serve():
                         mode, weapon = settings.get("mode"), settings.get("weapon")
                         if player is None or mode not in MODES or weapon not in (ALL, *WEAPONS):
                             raise ValueError("请先选择 Demo、选手和剪辑模式。")
+                        advanced = CaptureSettings.from_request(settings.get("advanced"))
                         style = settings.get("counter", COUNTERS[0])
                         show_label = settings.get("showLabel", True)
                         if style not in COUNTERS or not isinstance(show_label, bool):
                             raise ValueError("统计显示选项无效。")
-                        selected, kills = select_events(state["events"], player, mode, weapon)
+                        highlights = settings.get("highlights", list(HIGHLIGHTS))
+                        if not isinstance(highlights, list) or any(
+                            not isinstance(item, str) or item not in HIGHLIGHTS for item in highlights
+                        ):
+                            raise ValueError("高光类型无效。")
+                        montage = mode == "单回合特剪"
+                        events = state["events"]
+                        rounds = []
+                        if montage:
+                            matches, _ = select_events(events, player, "高光", weapon, highlights)
+                            rounds = sorted({event["total_rounds_played"] for event in matches})
+                        selected, kills = select_events(events, player, mode, weapon, highlights, settings.get("round"))
+
                         if self.path.endswith("/preview"):
-                            clips = make_clips(selected, kills, 0, 64, float("inf"))
-                            self.reply({"events": len(selected), "clips": len(clips)})
+                            clips = make_clips(selected, kills, 0, 64, float("inf"), montage=montage)
+                            self.reply({"events": len(selected), "clips": len(clips), "rounds": rounds})
                         elif not RECORDER.is_file():
                             raise ValueError("内置录制组件缺失，请从完整的工具目录启动。")
                         elif not selected:
@@ -128,9 +146,9 @@ def serve():
                                 try:
                                     deaths = [event for event in state["events"] if event.get("user_identity") == player]
                                     clips = make_clips(selected, kills, 0, 64, float("inf"),
-                                                       deaths=deaths, style=style, show_label=show_label)
+                                                       deaths=deaths, style=style, show_label=show_label, montage=montage)
                                     name = settings["player"].rsplit(" [", 1)[0]
-                                    record_demo(demo, output, player, name, clips, update)
+                                    record_demo(demo, output, player, name, clips, update, advanced, montage)
                                     with lock:
                                         state.update(output=output, filename=f"{name}-{mode}.mp4", message="视频已生成，可以下载。")
                                 except Exception as error:
