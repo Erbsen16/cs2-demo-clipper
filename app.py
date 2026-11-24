@@ -39,7 +39,11 @@ def read_demo(path):
     return events, dict(sorted(players.items()))
 
 
-HIGHLIGHTS = {"multi": "多杀", "headshot": "爆头", "noscope": "盲狙", "thrusmoke": "穿烟", "penetrated": "穿墙"}
+MULTIKILL_TYPES = {2: "double", 3: "triple", 4: "quad", 5: "ace"}
+HIGHLIGHTS = {
+    "ace": "ACE（五杀）", "quad": "四杀", "triple": "三杀", "double": "双杀",
+    "headshot": "爆头", "noscope": "盲狙", "thrusmoke": "穿烟", "penetrated": "穿墙",
+}
 
 
 def select_events(events, player, mode, category, highlights=None, round_id=None):
@@ -60,8 +64,8 @@ def select_events(events, player, mode, category, highlights=None, round_id=None
             round_counts[round_id] = round_counts.get(round_id, 0) + 1
         selected = [
             event for event in kills
-            if ("multi" in highlights and round_counts[event["total_rounds_played"]] >= 2)
-            or any(event.get(flag) for flag in highlights if flag != "multi")
+            if MULTIKILL_TYPES.get(min(5, round_counts[event["total_rounds_played"]])) in highlights
+            or any(event.get(flag) for flag in highlights if flag not in MULTIKILL_TYPES.values())
         ]
     if category != ALL:
         weapons = WEAPONS[category].split()
@@ -150,7 +154,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     lines = [header]
     start = 0
     for end, next_text in [*updates, (length, None)]:
-        if ass_time(end) != ass_time(start):
+        if text is not None and ass_time(end) != ass_time(start):
             lines.append(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,{placement}{text}\n")
         text = next_text
         start = end
@@ -165,7 +169,26 @@ def export_video(source, destination, selected, kills, tick_zero, rate, progress
     encode_clips(destination, [(source, *clip) for clip in clips], progress, montage=montage)
 
 
-def encode_clips(destination, clips, progress, advanced=None, montage=False):
+def broadcast_transition(length, enters, exits):
+    """Sweep diagonal stepped bands across a hard cut without retiming the footage."""
+    filters = []
+    beat = min(0.025, length / 36)
+    for band in range(9):
+        # The seam ends and begins on the same amber frame. Each horizontal
+        # band releases toward the right, giving the sweep a diagonal edge.
+        y = f"ih*{band}/9"
+        if exits:
+            onset = max(0, length - beat * (10 - band))
+            filters.append(f"drawbox=x=0:y={y}:w=iw:h=ih/9+2:color=0xF5AD36:t=fill:enable='gte(t,{onset})'")
+        if enters:
+            release = beat * (band + 2)
+            filters.append(f"drawbox=x=0:y={y}:w=iw:h=ih/9+2:color=0xF5AD36:t=fill:enable='lt(t,{release})'")
+    if enters:
+        filters.append(f"drawbox=color=white@0.26:t=fill:enable='lt(t,{beat * 2})'")
+    return filters
+
+
+def encode_clips(destination, clips, progress, advanced=None, montage=False, *, broadcast=False):
     import imageio_ffmpeg
 
     executable = imageio_ffmpeg.get_ffmpeg_exe()
@@ -186,14 +209,28 @@ def encode_clips(destination, clips, progress, advanced=None, montage=False):
         for index, (source, start, end, initial, updates) in enumerate(clips):
             progress(f"正在编码片段 {index + 1} / {len(clips)}")
             filters = ["pad=ceil(iw/2)*2:ceil(ih/2)*2"]
-            if initial is not None:
-                write_counter(root / "counter.ass", end - start, initial, updates, advanced)
-                filters.insert(0, "subtitles=counter.ass")
             audio_filters = []
-            if montage:
-                tail = max(0, end - start - 0.22)
+            length = end - start
+            if broadcast:
+                enters = index > 0
+                exits = index < len(clips) - 1
+                filters.extend(broadcast_transition(length, enters, exits))
+                if enters or exits:
+                    fade_in = 0.06 if enters else 0
+                    fade_out = 0.08 if exits else 0
+                    fades = []
+                    if fade_in:
+                        fades.append(f"afade=t=in:d={fade_in}")
+                    if fade_out:
+                        fades.append(f"afade=t=out:st={max(0, length - fade_out)}:d={fade_out}")
+                    audio_filters = ["-af", ",".join(fades)]
+            elif montage:
+                tail = max(0, length - 0.22)
                 filters.extend(["fade=t=in:d=0.10", f"fade=t=out:st={tail}:d=0.22"])
                 audio_filters = ["-af", f"afade=t=in:d=0.10,afade=t=out:st={tail}:d=0.22"]
+            if initial is not None:
+                write_counter(root / "counter.ass", end - start, initial, updates, advanced)
+                filters.append("subtitles=counter.ass")
             name = f"clip{index}.mp4"
             ffmpeg([
                 "-ss", str(start), "-i", source, "-t", str(end - start),

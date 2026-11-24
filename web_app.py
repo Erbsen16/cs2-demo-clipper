@@ -122,6 +122,9 @@ def serve():
                         ):
                             raise ValueError("高光类型无效。")
                         montage = mode == "单回合特剪"
+                        transition = settings.get("transition", "original")
+                        if transition not in ("original", "broadcast"):
+                            raise ValueError("转场样式无效。")
                         events = state["events"]
                         rounds = []
                         if montage:
@@ -148,7 +151,7 @@ def serve():
                                     clips = make_clips(selected, kills, 0, 64, float("inf"),
                                                        deaths=deaths, style=style, show_label=show_label, montage=montage)
                                     name = settings["player"].rsplit(" [", 1)[0]
-                                    record_demo(demo, output, player, name, clips, update, advanced, montage)
+                                    record_demo(demo, output, player, name, clips, update, advanced, montage, broadcast=transition == "broadcast")
                                     with lock:
                                         state.update(output=output, filename=f"{name}-{mode}.mp4", message="视频已生成，可以下载。")
                                 except Exception as error:

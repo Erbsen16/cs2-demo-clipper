@@ -27,7 +27,7 @@ def game_directory():
     raise RuntimeError("未找到 Steam 中安装的 CS2。")
 
 
-def record_demo(demo, destination, player_id, player_name, clips, progress, advanced=None, montage=False):
+def record_demo(demo, destination, player_id, player_name, clips, progress, advanced=None, montage=False, *, broadcast=False):
     from app import encode_clips
 
     if not RECORDER.is_file():
@@ -39,10 +39,10 @@ def record_demo(demo, destination, player_id, player_name, clips, progress, adva
             msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError as error:
             raise RuntimeError("已有剪辑窗口正在录制，请等待本次导出结束。") from error
-        _capture(demo, destination, player_id, player_name, clips, progress, encode_clips, advanced, montage)
+        _capture(demo, destination, player_id, player_name, clips, progress, encode_clips, advanced, montage, broadcast)
 
 
-def _capture(demo, destination, player_id, player_name, clips, progress, encode_clips, advanced, montage):
+def _capture(demo, destination, player_id, player_name, clips, progress, encode_clips, advanced, montage, broadcast):
     running = subprocess.run(["tasklist", "/FI", "IMAGENAME eq cs2.exe", "/FO", "CSV", "/NH"],
                              capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
     if b'"cs2.exe"' in running.stdout.lower():
@@ -125,4 +125,4 @@ def _capture(demo, destination, player_id, player_name, clips, progress, encode_
                                    (middle, end, right_initial, after)]
                     progress("当前片段录制超时，已保留完成的片段，正在分段重试…")
                 batch += 1
-        encode_clips(destination, sources, progress, advanced, montage)
+        encode_clips(destination, sources, progress, advanced, montage, broadcast=broadcast)
